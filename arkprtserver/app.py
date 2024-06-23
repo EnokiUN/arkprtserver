@@ -30,9 +30,9 @@ LOGGER: logging.Logger = logging.getLogger("arkprtserver")
 
 
 try:
-    from jinja_speedups import speedup_unix  # type: ignore
+    from jinja_speedups import *  # type: ignore # noqa: F403
 
-    speedup_unix(env)  # type: ignore
+    speedup_unix(env)  # type: ignore # noqa: F405
 except ImportError:
     pass
 
@@ -63,6 +63,7 @@ env_globals = dict(
     datetime=datetime,
 )
 env.globals.update(env_globals)  # type: ignore
+app["log_request"] = globals().get("log_request", lambda **_: None)  # type: ignore
 
 
 async def startup(app: aiohttp.web.Application) -> None:
@@ -95,7 +96,11 @@ async def startup_middleware(
     handler: typing.Callable[[aiohttp.web.Request], typing.Awaitable[aiohttp.web.StreamResponse]],
 ) -> aiohttp.web.StreamResponse:
     """Startup middleware."""
-    if not client.assets.loaded:
+    if "/api" in request.path:
+        while "client" not in request.app._state:
+            await asyncio.sleep(0)
+
+    if "client" not in request.app._state:
         template = env.get_template("startup.html.j2")
         return aiohttp.web.Response(text=template.render(request=request), content_type="text/html")
 
@@ -177,7 +182,7 @@ async def login(request: aiohttp.web.Request) -> aiohttp.web.Response:
 
     if not request.query.get("code"):
         try:
-            await auth.get_token_from_email_code(request.query["email"])
+            await auth.get_token_from_email_code(request.query["email"].strip())
         except arkprts.errors.BaseArkprtsError as e:
             if hasattr(e, "data") and e.data.get("result") == 50003:  # type: ignore
                 e.data["message"] = "Code has been sent in the last 60s, please wait before sending again"  # type: ignore
@@ -188,13 +193,13 @@ async def login(request: aiohttp.web.Request) -> aiohttp.web.Response:
         return response
 
     try:
-        channel_uid, token = await auth.get_token_from_email_code(request.query["email"], request.query["code"])
+        channel_uid, token = await auth.get_token_from_email_code(request.query["email"].strip(), request.query["code"])
     except arkprts.errors.BaseArkprtsError as e:
         return aiohttp.web.Response(text=template.render(request=request, error=str(e)), content_type="text/html")
 
     response = aiohttp.web.HTTPTemporaryRedirect("/user")
     response.set_cookie("server", auth.server)
-    response.set_cookie("channel_uid", channel_uid)
+    response.set_cookie("channeluid", channel_uid)
     response.set_cookie("token", token)
 
     return response
@@ -205,7 +210,7 @@ async def logout(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """Logout."""
     response = aiohttp.web.HTTPTemporaryRedirect("/login")
     response.del_cookie("server")
-    response.del_cookie("channel_uid")
+    response.del_cookie("channeluid")
     response.del_cookie("token")
 
     return response
@@ -213,16 +218,16 @@ async def logout(request: aiohttp.web.Request) -> aiohttp.web.Response:
 
 async def authorize(request: aiohttp.web.Request) -> typing.Union[arkprts.Client, aiohttp.web.Response]:
     """Attempt to authorize or redirect to login."""
-    if not request.cookies.get("channel_uid") or not request.cookies.get("token") or not request.cookies.get("server"):
+    if not request.cookies.get("channeluid") or not request.cookies.get("token") or not request.cookies.get("server"):
         return aiohttp.web.HTTPTemporaryRedirect("/login")
 
     auth = arkprts.YostarAuth(server=request.cookies["server"], network=client.network)  # type: ignore
 
     try:
-        await auth.login_with_token(request.cookies["channel_uid"], request.cookies["token"])
+        await auth.login_with_token(request.cookies["channeluid"], request.cookies["token"])
     except arkprts.errors.BaseArkprtsError:
         response = aiohttp.web.HTTPTemporaryRedirect("/login")
-        response.del_cookie("channel_uid")
+        response.del_cookie("channeluid")
         response.del_cookie("token")
         response.del_cookie("server")
         return response
@@ -254,11 +259,3 @@ app.add_routes(api_routes)
 def entrypoint(argv: list[str] = sys.argv) -> aiohttp.web.Application:
     """Return app as dummy aiohttp entrypoint."""
     return app
-
-
-handler = logging.StreamHandler()
-logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
-logger.addHandler(handler)
-
-logger.info("Starting with logging!")
